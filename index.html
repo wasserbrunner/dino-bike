@@ -35,48 +35,6 @@ fullscreenBtn.addEventListener('click', () => {
 });
 
 // existing game code here...
-
-// ===== Fullscreen controls (appended) =====
-(function(){
-  const fsBtn = document.getElementById('fsBtn');
-  const toastEl = document.getElementById('toast');
-  const isIOS = () => /iPad|iPhone|iPod/.test(navigator.userAgent);
-  const inFullscreen = () => document.fullscreenElement || document.webkitFullscreenElement;
-  function showToast(msg){
-    if(!toastEl) return;
-    toastEl.textContent = msg;
-    toastEl.classList.add('show');
-    clearTimeout(showToast._t);
-    showToast._t = setTimeout(()=>toastEl.classList.remove('show'), 3000);
-  }
-  async function enterFullscreen(){
-    try{
-      if (canvas.requestFullscreen) await canvas.requestFullscreen({ navigationUI: 'hide' });
-      else if (canvas.webkitRequestFullscreen) await canvas.webkitRequestFullscreen();
-      else throw new Error('noFS');
-      if (screen.orientation && screen.orientation.lock){
-        screen.orientation.lock('landscape').catch(()=>{});
-      }
-    }catch(err){
-      if (isIOS()){
-        showToast('On iPhone/iPad: Share → Add to Home Screen for true full screen.');
-      } else {
-        showToast('Fullscreen not supported in this browser.');
-      }
-    }
-  }
-  function exitFullscreen(){
-    if (document.exitFullscreen) document.exitFullscreen();
-    else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
-  }
-  function syncFsButton(){ if (!fsBtn) return; fsBtn.textContent = inFullscreen() ? 'Exit full screen' : 'Full screen'; }
-  if (fsBtn){
-    fsBtn.addEventListener('click', ()=>{ if (inFullscreen()) exitFullscreen(); else enterFullscreen(); });
-  }
-  document.addEventListener('fullscreenchange', ()=>{ syncFsButton(); resize(); });
-  document.addEventListener('webkitfullscreenchange', ()=>{ syncFsButton(); resize(); });
-  syncFsButton();
-})();
 </script>
 </body>
 </html>
