@@ -23,18 +23,5 @@
 <body>
 <button id="fullscreenBtn">Fullscreen</button>
 <canvas id="game"></canvas>
-<script>
-// Fullscreen toggle
-const fullscreenBtn = document.getElementById('fullscreenBtn');
-fullscreenBtn.addEventListener('click', () => {
-  if (!document.fullscreenElement) {
-    document.documentElement.requestFullscreen().catch(err => console.warn(err));
-  } else {
-    document.exitFullscreen();
-  }
-});
-
-// existing game code here...
-</script>
 </body>
 </html>
