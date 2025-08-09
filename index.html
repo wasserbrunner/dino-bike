@@ -7,21 +7,346 @@
   html, body { margin:0; padding:0; height:100%; background:skyblue; }
   body { overflow:hidden; }
   canvas { display:block; width:100vw; height:100vh; touch-action:none; -webkit-user-select:none; user-select:none; -webkit-touch-callout:none; }
-  #fullscreenBtn {
-    position: absolute;
-    top: 10px;
-    right: 10px;
-    z-index: 10;
-    background: rgba(255,255,255,0.8);
-    border: none;
-    padding: 8px 12px;
-    font-size: 16px;
-    border-radius: 6px;
-  }
+  #fsBtn{position:fixed;bottom:16px;right:16px;z-index:10;background:rgba(0,0,0,.6);color:#fff;border:0;border-radius:12px;padding:10px 14px;font-size:16px;box-shadow:0 4px 10px rgba(0,0,0,.2)}
+  #fsBtn:active{transform:scale(0.98)}
+  .toast{position:fixed;left:50%;bottom:70px;transform:translateX(-50%);z-index:10;background:rgba(0,0,0,.75);color:#fff;padding:8px 12px;border-radius:10px;opacity:0;transition:opacity .25s ease;pointer-events:none}
+  .toast.show{opacity:1}
 </style>
 </head>
 <body>
-<button id="fullscreenBtn">Fullscreen</button>
+<button id="fsBtn" aria-label="Toggle full screen">Full screen</button>
+<div id="toast" class="toast"></div>
 <canvas id="game"></canvas>
+<script>
+// ===================== SETUP =====================
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+let DPR = Math.min(window.devicePixelRatio || 1, 2);
+function resize(){
+  const w = window.innerWidth, h = window.innerHeight;
+  canvas.style.width = w + 'px';
+  canvas.style.height = h + 'px';
+  canvas.width = Math.floor(w * DPR);
+  canvas.height = Math.floor(h * DPR);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+}
+window.addEventListener('resize', resize); resize();
+
+
+
+// ===================== WORLD / PATH =====================
+let points = [], segLens = [], totalLen = 0;
+let scrollX = 0;
+const SCROLL_SPEED = 2; // world scroll/pan speed (pixels per frame)
+
+// pencil always on-screen + always drawing
+let pencilPos = { x: window.innerWidth/2, y: window.innerHeight/2 };
+let isDrawing = true; // always true; user can move it
+
+// bike progress along the drawn path (sequence order)
+let pathProgress = 0; // distance along the polyline
+let lastProgress = 0; // for wheel rotation
+const BASE_SPEED = 3.0, CATCHUP_GAIN = 0.02, MAX_SPEED = 25;
+
+function addPoint(p){
+  const last = points[points.length - 1];
+  if (!last){ points.push(p); points.push({...p}); segLens.push(0); return; }
+  const dx = p.x - last.x, dy = p.y - last.y, len = Math.hypot(dx, dy);
+  if (len < 0.5) return; // de-noise
+  points.push(p); segLens.push(len); totalLen += len;
+}
+function pruneFront(){
+  const cutoffX = scrollX - 200; // keep some history
+  while (points.length > 2 && points[1].x < cutoffX){
+    const removed = segLens[0] || 0;
+    points.shift(); segLens.shift(); totalLen -= removed;
+    pathProgress = Math.max(0, pathProgress - removed);
+    lastProgress = Math.max(0, lastProgress - removed);
+  }
+}
+function posAt(s){
+  if (points.length < 2) return { x: scrollX + window.innerWidth*0.35, y: window.innerHeight/2 };
+  s = Math.max(0, Math.min(s, totalLen)); let acc = 0;
+  for (let i=0;i<segLens.length;i++){
+    const L = segLens[i];
+    if (acc + L >= s){
+      const t = L > 0 ? (s - acc)/L : 0; const p1 = points[i], p2 = points[i+1];
+      return { x: p1.x + (p2.x-p1.x)*t, y: p1.y + (p2.y-p1.y)*t };
+    }
+    acc += L;
+  }
+  const last = points[points.length-1]; return { x:last.x, y:last.y };
+}
+function tangentAngleAt(s){
+  const prev = posAt(Math.max(0, s - 2));
+  const next = posAt(Math.min(totalLen, s + 2));
+  return Math.atan2(next.y - prev.y, next.x - prev.x);
+}
+
+// ===================== BACKGROUND CLOUDS =====================
+const clouds = [];
+const CLOUD_MIN = 6, CLOUD_MAX = 9;
+function spawnCloud(worldX){
+  const w = 50 + Math.random()*80;
+  clouds.push({ x: worldX, y: 20 + Math.random()*120, w, h: w*0.45, speedMul: 0.2 + Math.random()*0.3, type: Math.floor(Math.random()*3) });
+}
+function initClouds(){
+  clouds.length = 0;
+  const start = scrollX - canvas.width, end = scrollX + canvas.width*2;
+  for (let x = start; x < end; x += 220 + Math.random()*160) spawnCloud(x);
+}
+function updateClouds(){
+  const leftBound = scrollX - canvas.width*1.2;
+  const rightSpawn = scrollX + canvas.width*1.2;
+  for (let i = clouds.length-1; i >= 0; i--){
+    const c = clouds[i]; c.x -= (SCROLL_SPEED * c.speedMul);
+    if (c.x + c.w < leftBound) clouds.splice(i,1);
+  }
+  while (clouds.length < CLOUD_MIN) spawnCloud(rightSpawn + Math.random()*400);
+  while (clouds.length > CLOUD_MAX) clouds.pop();
+}
+function drawCloud(c){
+  const x = c.x - scrollX, y = c.y;
+  ctx.fillStyle = 'white';
+  ctx.beginPath();
+  if (c.type === 0){
+    ctx.ellipse(x, y, c.w*0.4, c.h*0.5, 0, 0, Math.PI*2);
+    ctx.ellipse(x + c.w*0.25, y + c.h*0.1, c.w*0.35, c.h*0.45, 0, 0, Math.PI*2);
+    ctx.ellipse(x - c.w*0.25, y + c.h*0.1, c.w*0.35, c.h*0.45, 0, 0, Math.PI*2);
+  } else if (c.type === 1){
+    ctx.ellipse(x, y, c.w*0.5, c.h*0.45, 0, 0, Math.PI*2);
+    ctx.ellipse(x - c.w*0.3, y + c.h*0.1, c.w*0.25, c.h*0.35, 0, 0, Math.PI*2);
+  } else {
+    ctx.ellipse(x, y, c.w*0.35, c.h*0.45, 0, 0, Math.PI*2);
+    ctx.ellipse(x + c.w*0.2, y + c.h*0.05, c.w*0.35, c.h*0.45, 0, 0, Math.PI*2);
+  }
+  ctx.fill();
+}
+function drawSky(){
+  ctx.fillStyle = 'skyblue'; ctx.fillRect(0,0,canvas.width,canvas.height);
+  for (const c of clouds) drawCloud(c);
+}
+
+// ===================== EGGS & PTERODACTYLS =====================
+const eggs = []; // {x,y,hatched:false}
+const flyers = []; // {x,y,vx,vy,life}
+function spawnEgg(){
+  const ahead = scrollX + canvas.width + 200 + Math.random()*600;
+  const baseY = Math.min(window.innerHeight*0.8, Math.max(window.innerHeight*0.35, window.innerHeight*0.6 + (Math.random()-0.5)*80));
+  eggs.push({x: ahead, y: baseY, hatched:false});
+}
+function drawEgg(e){
+  const x = e.x - scrollX, y = e.y;
+  ctx.save(); ctx.translate(x,y);
+  ctx.fillStyle = '#EEE'; ctx.beginPath(); ctx.ellipse(0, 0, 14, 18, 0, 0, Math.PI*2); ctx.fill();
+  ctx.strokeStyle = '#CCC'; ctx.stroke(); ctx.restore();
+}
+function hatchEgg(e){
+  e.hatched = true;
+  flyers.push({ x: e.x, y: e.y-10, vx: 3 + Math.random()*2, vy: -2 - Math.random()*1.5, life: 3 });
+}
+function updateFlyers(dt){
+  for (let i=flyers.length-1; i>=0; i--){
+    const f = flyers[i]; f.x += f.vx; f.y += f.vy; f.vy -= 0.03; f.life -= dt;
+    if (f.x - scrollX > canvas.width + 60 || f.y < -60 || f.life <= 0) flyers.splice(i,1);
+  }
+}
+function drawPterodactyl(f){
+  const x = f.x - scrollX, y = f.y; ctx.save(); ctx.translate(x,y);
+  ctx.fillStyle = '#8B5CF6'; ctx.beginPath(); ctx.ellipse(0,0,12,6,0,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#EAB308'; ctx.beginPath(); ctx.moveTo(10,-2); ctx.lineTo(18,0); ctx.lineTo(10,2); ctx.closePath(); ctx.fill();
+  const t = performance.now()/200; const flap = Math.sin(t) * 8;
+  ctx.strokeStyle = '#7C3AED'; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(-2,0); ctx.lineTo(-22, -8 - flap); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(2,0); ctx.lineTo(22, -8 + flap); ctx.stroke();
+  ctx.restore();
+}
+
+// ===================== RENDER HELPERS =====================
+function drawPath(){
+  if (points.length < 2) return;
+  ctx.lineWidth = 8; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+  ctx.beginPath();
+  for (let i=0;i<points.length;i++){
+    const p = points[i], sx = p.x - scrollX, sy = p.y;
+    if (i===0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
+  }
+  const grad = ctx.createLinearGradient(0,0,canvas.width,0);
+  grad.addColorStop(0,'red'); grad.addColorStop(0.17,'orange'); grad.addColorStop(0.33,'yellow'); grad.addColorStop(0.5,'green'); grad.addColorStop(0.67,'blue'); grad.addColorStop(0.83,'indigo'); grad.addColorStop(1,'violet');
+  ctx.strokeStyle = grad; ctx.stroke();
+}
+
+function drawBikeWithDino(x, y, angle, wheelRot){
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(angle);
+
+  // --- BIKE ---
+  // wheels
+  ctx.fillStyle = '#222';
+  ctx.beginPath(); ctx.arc(-20, 0, 9, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc( 20, 0, 9, 0, Math.PI*2); ctx.fill();
+
+  // spokes (rotate by wheelRot)
+  ctx.strokeStyle = '#999'; ctx.lineWidth = 2;
+  for (const off of [-20, 20]){
+    ctx.save(); ctx.translate(off, 0); ctx.rotate(wheelRot);
+    ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(0,-9); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(0, 9); ctx.stroke();
+    ctx.restore();
+  }
+
+  // frame (simple diamond-ish)
+  ctx.strokeStyle = '#E11D48'; ctx.lineWidth = 3; ctx.beginPath();
+  ctx.moveTo(-20, 0); ctx.lineTo(-2, -12); // rear to bottom bracket
+  ctx.lineTo(18, 0);                        // to front wheel
+  ctx.moveTo(-2, -12); ctx.lineTo(0, -26);  // seat tube
+  ctx.moveTo(0, -26); ctx.lineTo(12, -26);  // top tube to head
+  ctx.moveTo(12, -26); ctx.lineTo(20, 0);   // head to fork
+  ctx.stroke();
+  // handlebar
+  ctx.beginPath(); ctx.moveTo(12, -26); ctx.lineTo(22, -30); ctx.moveTo(12, -26); ctx.lineTo(22, -22); ctx.stroke();
+  // crank + pedals (rotate with rear wheel)
+  const crankR = 6; const pedalLen = 8; const bbx = -2, bby = -12;
+  ctx.save(); ctx.translate(bbx, bby); ctx.rotate(wheelRot);
+  ctx.strokeStyle = '#666'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(-crankR, 0); ctx.lineTo(crankR, 0); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(crankR, 0); ctx.lineTo(crankR + pedalLen, 0); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(-crankR, 0); ctx.lineTo(-crankR - pedalLen, 0); ctx.stroke();
+  ctx.restore();
+  // seat
+  ctx.strokeStyle = '#000'; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(-4, -26); ctx.lineTo(4, -26); ctx.stroke();
+
+  // --- DINO RIDER ---
+  // tail
+  ctx.fillStyle = '#10B981'; ctx.beginPath(); ctx.moveTo(-12, -30); ctx.lineTo(-24, -28); ctx.lineTo(-12, -24); ctx.closePath(); ctx.fill();
+  // body
+  ctx.fillStyle = '#10B981'; ctx.beginPath(); ctx.ellipse(-2, -30, 14, 10, 0, 0, Math.PI*2); ctx.fill();
+  // tummy patch
+  ctx.fillStyle = '#A7F3D0'; ctx.beginPath(); ctx.ellipse(2, -28, 7, 6, 0, 0, Math.PI*2); ctx.fill();
+  // head
+  ctx.fillStyle = '#10B981'; ctx.beginPath(); ctx.arc(6, -40, 9, 0, Math.PI*2); ctx.fill();
+  // eye
+  ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(9, -42, 2.4, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#111'; ctx.beginPath(); ctx.arc(9.9, -42, 1.2, 0, Math.PI*2); ctx.fill();
+  // mouth
+  ctx.strokeStyle = '#065F46'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(8, -38); ctx.quadraticCurveTo(6, -36, 3.5, -37); ctx.stroke();
+  // back spikes
+  ctx.fillStyle = '#34D399';
+  for (let i = -34; i <= -26; i += 4){
+    ctx.beginPath(); ctx.moveTo(i + 28, -26); ctx.lineTo(i + 30, -32); ctx.lineTo(i + 32, -26); ctx.closePath(); ctx.fill();
+  }
+  // arms to handlebar
+  ctx.strokeStyle = '#0F766E'; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(0, -32); ctx.lineTo(12, -27); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(0, -30); ctx.lineTo(12, -23); ctx.stroke();
+  // legs to pedals (animate with crank)
+  const kneeLift = Math.sin(wheelRot) * 3;
+  ctx.beginPath(); ctx.moveTo(-6, -22); ctx.lineTo(bbx + crankR + pedalLen, bby + kneeLift); ctx.stroke(); // right
+  ctx.beginPath(); ctx.moveTo(-6, -22); ctx.lineTo(bbx - crankR - pedalLen, bby - kneeLift); ctx.stroke(); // left
+  // helmet (cute)
+  ctx.fillStyle = '#3B82F6'; ctx.beginPath(); ctx.arc(6, -43, 9, Math.PI, 0); ctx.fill();
+
+  ctx.restore();
+}
+
+function drawPencil(){
+  // Always visible pencil at 45° with correct tip direction (pointing forward/right)
+  const x = pencilPos.x, y = pencilPos.y;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(Math.PI/4); // 45°
+  // barrel
+  ctx.fillStyle = '#F59E0B';
+  ctx.fillRect(-22, -4, 28, 8); // left (eraser) -> right (tip)
+  // eraser
+  ctx.fillStyle = '#9CA3AF';
+  ctx.fillRect(-26, -5, 4, 10);
+  // metal band
+  ctx.fillStyle = '#D1D5DB';
+  ctx.fillRect(-22, -5, 3, 10);
+  // tip triangle (to the RIGHT)
+  ctx.beginPath();
+  ctx.moveTo(6, -4);
+  ctx.lineTo(14, 0);
+  ctx.lineTo(6, 4);
+  ctx.closePath();
+  ctx.fillStyle = '#D1B48C'; // wood
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(10, -2);
+  ctx.lineTo(14, 0);
+  ctx.lineTo(10, 2);
+  ctx.closePath();
+  ctx.fillStyle = '#111'; // graphite
+  ctx.fill();
+  ctx.restore();
+}
+
+// ===================== INPUT =====================
+// User can move the always-on pencil; releasing finger keeps drawing from last spot
+canvas.addEventListener('pointerdown', (e) => {
+  if (e.pointerType === 'mouse' && e.button !== 0) return;
+  canvas.setPointerCapture(e.pointerId);
+  pencilPos.x = e.clientX; pencilPos.y = e.clientY;
+});
+canvas.addEventListener('pointermove', (e) => {
+  pencilPos.x = e.clientX; pencilPos.y = e.clientY;
+});
+function endDraw(e){ try{ canvas.releasePointerCapture(e.pointerId); }catch(_){} }
+canvas.addEventListener('pointerup', endDraw);
+canvas.addEventListener('pointercancel', endDraw);
+
+// ===================== ANIMATION =====================
+let lastTs = 0;
+let wheelRot = 0; // accumulative rotation for spokes/pedals
+// spawn timers
+let eggTimer = 0; // seconds
+
+function loop(ts){
+  const dt = Math.max(0, (ts - lastTs)/1000); lastTs = ts || 0;
+  scrollX += SCROLL_SPEED; pruneFront(); updateClouds();
+
+  // Always add a point at the pencil (so the path keeps extending)
+  addPoint({ x: pencilPos.x + scrollX, y: pencilPos.y });
+
+  // Follow speed with catch-up, pathProgress always moves forward along drawn path order
+  const backlog = Math.max(0, totalLen - pathProgress);
+  let followSpeed = Math.min(MAX_SPEED, BASE_SPEED + backlog * CATCHUP_GAIN);
+  pathProgress = Math.min(totalLen, pathProgress + followSpeed);
+
+  const pos = posAt(pathProgress);
+  const angle = tangentAngleAt(pathProgress);
+
+  // wheel rotation based on distance moved this frame
+  const delta = Math.max(0, pathProgress - lastProgress);
+  lastProgress = pathProgress;
+  const wheelRadius = 9; // matches draw
+  wheelRot += delta / wheelRadius; // radians approximation
+
+  // Eggs spawn & collide
+  eggTimer += dt; if (eggTimer > 2.2 + Math.random()*1.2 && eggs.length < 3){ eggTimer = 0; spawnEgg(); }
+  const riderWorld = { x: pos.x, y: pos.y };
+  for (let i=eggs.length-1; i>=0; i--){
+    const e = eggs[i]; if (e.hatched) continue; if (e.x - scrollX < -60){ eggs.splice(i,1); continue; }
+    const dx = riderWorld.x - e.x, dy = riderWorld.y - e.y; if (dx*dx + dy*dy < 32*32){ hatchEgg(e); eggs.splice(i,1); }
+  }
+  updateFlyers(dt);
+
+  // ===================== RENDER =====================
+  drawSky();
+  drawPath();
+  drawBikeWithDino(riderWorld.x - scrollX, riderWorld.y, angle, wheelRot);
+  for (const e of eggs) drawEgg(e);
+  for (const f of flyers) drawPterodactyl(f);
+  drawPencil();
+
+  requestAnimationFrame(loop);
+}
+
+// Kickoff
+initClouds();
+requestAnimationFrame(loop);
+</script>
 </body>
 </html>
